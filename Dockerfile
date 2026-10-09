@@ -1,12 +1,18 @@
-FROM python:3.11-slim
+FROM mcr.microsoft.com/mirror/docker/library/python:3.11-slim
 
-# Install GDAL and spatial C-libraries
+# Install GDAL, spatial C-libraries, and container-IDE essentials (procps, wget, curl, tar)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gdal-bin \
     libgdal-dev \
     libgeos-dev \
     libproj-dev \
+    procps \
+    wget \
+    curl \
+    ca-certificates \
+    tar \
+    gzip \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
