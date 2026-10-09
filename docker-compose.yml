@@ -1,0 +1,17 @@
+version: "3.8"
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: geospatial_api
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount current directory into /app inside container
+      - .:/app
+    environment:
+      - PYTHONUNBUFFERED=1
+    # Override CMD with the --reload flag for live development
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
