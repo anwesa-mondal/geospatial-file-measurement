@@ -130,7 +130,7 @@ Geospatial measurements depend fundamentally on geometry dimension:
 
 ### Prerequisites
 - [Docker](https://www.docker.com/) & Docker Compose
-- *Optional for local dev without Docker:* Python 3.11+, Node.js 20+, PostgreSQL 16, Redis 7
+- *Optional for local dev without Docker:* [uv](https://docs.astral.sh/uv/), Python 3.11+, Node.js 20+, PostgreSQL 16, Redis 7
 
 ### 1. Running with Docker Compose (Recommended)
 
@@ -171,11 +171,19 @@ Geospatial measurements depend fundamentally on geometry dimension:
    cp .env.example .env
    ```
 
-3. **Install Python backend dependencies:**
+3. **Install Python backend dependencies using `uv`:**
    ```bash
-   python -m venv .venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\Activate.ps1
-   pip install -r requirements.txt
+   # Create virtual environment with uv
+   uv venv
+
+   # Activate virtual environment
+   # On macOS/Linux:
+   source .venv/bin/activate
+   # On Windows:
+   .venv\Scripts\activate
+
+   # Install dependencies with uv pip
+   uv pip install -r requirements.txt
    ```
 
 4. **Build the frontend:**
