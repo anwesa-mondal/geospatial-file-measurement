@@ -6,6 +6,12 @@ The application serves both the interactive React web console and REST API on **
 
 ---
 
+## Demo
+
+https://github.com/user-attachments/assets/b47baaf6-1325-4b69-9bfb-b31a60ef4a8b
+
+---
+
 ## Architecture & System Design
 
 ### 1. Application Structure
