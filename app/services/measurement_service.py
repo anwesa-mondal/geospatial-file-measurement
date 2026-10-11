@@ -136,9 +136,7 @@ class MeasurementService:
                 feature_records=feature_records
             )
 
-            # Approach 1: Write-Through Cache Update to COMPLETED immediately
             try:
-                from app.api.contract.response.file_response import FileResponse
                 resp_dto = FileResponse.model_validate(updated_record)
                 await self.cache_service.set(f"cache:meta:{file_record.id}", resp_dto.model_dump_json(), ex=86400)
             except Exception as cache_err:
@@ -154,7 +152,6 @@ class MeasurementService:
                 file_size=file_record.file_size
             )
             try:
-                from app.api.contract.response.file_response import FileResponse
                 resp_dto = FileResponse.model_validate(failed_record)
                 await self.cache_service.set(f"cache:meta:{file_record.id}", resp_dto.model_dump_json(), ex=86400)
             except Exception as cache_err:
@@ -166,7 +163,6 @@ class MeasurementService:
         cached_json = await self.cache_service.get(cache_key)
         if cached_json:
             try:
-                from app.api.contract.response.file_response import FileResponse
                 return FileResponse.model_validate_json(cached_json)
             except Exception as err:
                 logger.warning(f"Error deserializing cached metadata: {err}")
@@ -178,9 +174,7 @@ class MeasurementService:
                 status.HTTP_404_NOT_FOUND
             )
 
-        # Cache fetched record
         try:
-            from app.api.contract.response.file_response import FileResponse
             resp_dto = FileResponse.model_validate(file_record)
             ex = 86400 if str(file_record.status).lower() in ("completed", "failed") else 10
             await self.cache_service.set(cache_key, resp_dto.model_dump_json(), ex=ex)
