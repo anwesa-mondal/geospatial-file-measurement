@@ -21,6 +21,7 @@ from app.queue.producer import StreamProducer
 from app.api.contract.response.file_response import (
     MeasurementFeatureResponse,
     PaginatedMeasurementsResponse,
+    FileResponse
 )
 from app.api.exceptions.global_exception_handler import InvalidFileException
 
@@ -80,6 +81,13 @@ class MeasurementService:
             file_size=size,
             file_path=str(file_path)
         )
+
+        try:
+            resp_dto = FileResponse.model_validate(file_record)
+            await self.cache_service.set(f"cache:meta:{file_id}", resp_dto.model_dump_json(), ex=60)
+        except Exception as cache_err:
+            logger.warning(f"Could not prime metadata cache: {cache_err}")
+
         return file_record
 
     async def process_staged_file(
@@ -121,29 +129,64 @@ class MeasurementService:
             feature_count = len(gdf)
             feature_records = self._process_each_feature(file_record.id, gdf)
 
-            return await self.repository.save_processed_file(
+            updated_record = await self.repository.save_processed_file(
                 file_id=file_record.id,
                 source_crs=source_crs_str,
                 feature_count=feature_count,
                 feature_records=feature_records
             )
+
+            # Approach 1: Write-Through Cache Update to COMPLETED immediately
+            try:
+                from app.api.contract.response.file_response import FileResponse
+                resp_dto = FileResponse.model_validate(updated_record)
+                await self.cache_service.set(f"cache:meta:{file_record.id}", resp_dto.model_dump_json(), ex=86400)
+            except Exception as cache_err:
+                logger.warning(f"Failed to update metadata cache: {cache_err}")
+
+            return updated_record
         except Exception as e:
             logger.error(f"Error processing file {file_record.id}: {e}")
-            await self.repository.mark_file_failed(
+            failed_record = await self.repository.mark_file_failed(
                 file_id=file_record.id,
                 error_message=str(e),
                 filename=file_record.filename,
                 file_size=file_record.file_size
             )
+            try:
+                from app.api.contract.response.file_response import FileResponse
+                resp_dto = FileResponse.model_validate(failed_record)
+                await self.cache_service.set(f"cache:meta:{file_record.id}", resp_dto.model_dump_json(), ex=86400)
+            except Exception as cache_err:
+                logger.warning(f"Failed to update metadata cache on failure: {cache_err}")
             raise e
 
-    async def get_file_metadata(self, id: str) -> FileRecord:
+    async def get_file_metadata(self, id: str) -> Union[FileRecord, dict]:
+        cache_key = f"cache:meta:{id}"
+        cached_json = await self.cache_service.get(cache_key)
+        if cached_json:
+            try:
+                from app.api.contract.response.file_response import FileResponse
+                return FileResponse.model_validate_json(cached_json)
+            except Exception as err:
+                logger.warning(f"Error deserializing cached metadata: {err}")
+
         file_record = await self.repository.get_file_by_id(id)
         if not file_record:
             raise InvalidFileException(
                 f"File with ID '{id}' was not found.",
                 status.HTTP_404_NOT_FOUND
             )
+
+        # Cache fetched record
+        try:
+            from app.api.contract.response.file_response import FileResponse
+            resp_dto = FileResponse.model_validate(file_record)
+            ex = 86400 if str(file_record.status).lower() in ("completed", "failed") else 10
+            await self.cache_service.set(cache_key, resp_dto.model_dump_json(), ex=ex)
+        except Exception as cache_err:
+            logger.warning(f"Failed to set metadata cache: {cache_err}")
+
         return file_record
 
     async def get_file_by_id(self, id: str) -> FileRecord:
