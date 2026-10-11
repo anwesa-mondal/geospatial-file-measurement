@@ -145,8 +145,9 @@ docker compose up -d --build
 docker compose logs -f
 ```
 
-3. Explore interactive Swagger documentation:
-Visit `http://localhost:8000/docs`.
+3. Access the Web Application & Docs:
+- **Web UI:** Visit `http://localhost:8000/` for the interactive measurement console.
+- **API Swagger Documentation:** Visit `http://localhost:8000/docs`.
 
 ### Running Tests
 
