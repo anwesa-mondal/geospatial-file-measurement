@@ -1,77 +1,241 @@
-# Geospatial File Measurement API
+# Geospatial File Measurement API & Console
 
-A production-ready FastAPI backend that ingests geospatial vector files (`.kml` and `.zip` ESRI Shapefiles), extracts features and source attributes, validates geometries, and computes accurate geographic measurements (area, perimeter, and length) using geodesic or projected planar methods.
+A high-performance FastAPI and React web service that ingests geospatial vector files (`.kml` Keyhole Markup Language and `.zip` ESRI Shapefiles), extracts features with source attributes, validates geometric topology, and computes accurate geographic measurements (area, perimeter, and length) using geodesic ellipsoidal or projected planar methods.
 
----
-
-## Features
-
-- **Format Ingestion:** 
-  - Standard Keyhole Markup Language (`.kml`) via GDAL / Fiona KML & LIBKML drivers.
-  - ESRI Shapefile archives packaged as `.zip` containing mandatory `.shp`, `.shx`, and `.dbf` files.
-- **Robust Validation:**
-  - Geometry validation via Shapely: detects null/empty geometries, unsupported geometry collections, and topological invalidities (e.g., self-intersecting bowtie polygons) with detailed diagnostic messages.
-  - Coordinate Reference System (CRS) validation: inspects source CRS before measuring.
-- **Accurate Geographic Measurements:**
-  - **Geographic CRS (e.g. WGS84 / EPSG:4326):** Uses ellipsoidal geodesic algorithms via PyProj `Geod(ellps="WGS84")` for true Earth-surface area ($m^2$) and length ($m$), avoiding projection distortion.
-  - **Projected CRS (e.g. UTM, Web Mercator / EPSG:3857):** Calculates planar area and perimeter directly in meters.
-  - **Points & Multipoints:** Handled explicitly with `method="NONE"` and `null` measurements.
-  - **Invalid Geometries:** Excluded from calculation without failing the entire file.
-- **Persistence & Retrieval:**
-  - Async PostgreSQL database (SQLAlchemy 2.0 + asyncpg) storing file metadata and per-feature measurements.
-  - REST endpoints for file uploads, file metadata retrieval, and paginated measurement querying.
-- **Crash-Resilient Asynchronous Queue:**
-  - Zero-JVM Redis Streams queueing for large files.
-  - Background worker consuming via consumer groups (`XREADGROUP`) and auto-claiming crashed/orphaned tasks (`XAUTOCLAIM`).
-- **Security & Reliability:**
-  - 50 MB upload limit.
-  - Zip-Slip path traversal protection on extracted archives.
-  - Temporary file cleanup after processing.
-  - Multi-service Docker container setup (API, Worker, PostgreSQL, Redis).
+The application serves both the interactive React web console and REST API on **port 8000**.
 
 ---
 
-## Architecture & Processing Flow
+## Architecture & System Design
 
-```mermaid
-flowchart TD
-    Client([Client / Frontend]) -->|Upload File| UploadEndpoint["POST /api/files/"]
-    UploadEndpoint --> UploadService["UploadFileService\n(Validates size & format, stages temp file)"]
-    UploadService --> QueueProducer["StreamProducer\n(XADD job payload to Redis Stream)"]
-    QueueProducer --> DBRepoInit["FileRepository\n(Creates 'processing' record in PostgreSQL)"]
-    DBRepoInit --> ImmediateResp["Immediate Response\n(File ID, status: 'processing')"]
-    ImmediateResp --> Client
+### 1. Application Structure
 
-    subgraph Background Worker Service
-        Worker["StreamConsumer\n(XREADGROUP & XAUTOCLAIM)"] --> QueueProducer
-        Worker --> MeasurementService["MeasurementService\n(Parses KML/ZIP, Validates Geometries, Computes Metrics)"]
-        MeasurementService --> DBRepoComplete["FileRepository\n(Persists Features & marks 'completed'/'failed')"]
-        DBRepoComplete --> TempCleanup["Cleanup temp staged file"]
-        TempCleanup --> Ack["XACK message on Redis Stream"]
-    end
-
-    Client -.->|Query Status & Results| GetFile["GET /api/files/{id}"]
-    Client -.->|Query Measurements| GetMeasurements["GET /api/files/{id}/measurements"]
+```
+geospatial-file-measurement/
+├── app/
+│   ├── api/
+│   │   ├── controllers/         # FastAPI route controllers (/api/files)
+│   │   └── contract/            # Request and Response schemas (Pydantic v2)
+│   ├── db/
+│   │   ├── database.py          # Async SQLAlchemy engine & sessionmaker (PostgreSQL)
+│   │   └── models.py            # FileRecord and FeatureRecord ORM models
+│   ├── exceptions/              # Domain-specific HTTP exceptions & handlers
+│   ├── queue/
+│   │   ├── producer.py          # Redis Streams message producer (XADD)
+│   │   └── consumer.py          # Redis Streams consumer group worker (XREADGROUP, XAUTOCLAIM)
+│   ├── repositories/
+│   │   └── file_repository.py   # Async database repository pattern
+│   ├── services/
+│   │   ├── cache_service.py     # Redis caching for measurement pagination
+│   │   ├── geometry_validator.py # Topological & geometric validation via Shapely
+│   │   ├── measurement_engine.py # Geodesic (PyProj WGS84) & planar calculations
+│   │   └── measurement_service.py # File staging, archive extraction, coordinate parsing
+│   ├── main.py                  # App entry point, static asset mounts, SPA catch-all
+│   └── worker.py                # Standalone background consumer process
+├── frontend/                    # React 19 + TypeScript + Vite + Tailwind Console
+│   ├── src/
+│   │   ├── components/          # Modular UI components (Upload, Lookup, Metadata, Table)
+│   │   └── App.tsx              # Root dashboard coordinator
+│   └── vite.config.ts           # Build bundle config and dev API proxy
+├── tests/                       # Automated pytest test suites (29 tests)
+├── Dockerfile                   # Multi-stage build (Node build -> Python runtime)
+├── docker-compose.yml           # Multi-container orchestration (API, Worker, Postgres, Redis)
+└── requirements.txt             # Python dependencies
 ```
 
 ---
 
-## API Endpoints
+### 2. Processing & Calculation Flow
+
+**Usual processing flow**
+
+```mermaid
+flowchart LR
+    Client([Client / Web Browser]) -->|1. Upload .kml / .zip| UploadAPI["POST /api/files/"]
+    UploadAPI --> StageFile["Stage file to disk (uploads/) & validate format"]
+    StageFile --> Enqueue["Publish job payload to Redis Stream (XADD)"]
+    Enqueue --> DBInit["Insert initial FileRecord ('PROCESSING') in PostgreSQL"]
+    DBInit --> FastResp["Return 201 Created with File UUID & 'PROCESSING' status"]
+    FastResp --> Client
+    Client -.->|2. Poll Status| StatusAPI["GET /api/files/{id}"]
+    Client -.->|3. Retrieve Measurements| MeasAPI["GET /api/files/{id}/measurements"]
+```
+**Background worker flow**
+
+```mermaid
+flowchart LR
+    Worker["StreamConsumer (XREADGROUP)"] --> FetchJob["Consume next job payload"]
+    FetchJob --> ParseLayer["Parse Vector Layer (GDAL / Fiona / GeoPandas)"]
+    ParseLayer --> GeomLoop{"For Each Feature"}
+    GeomLoop --> Validate["Validate Geometry (Shapely: validity, self-intersections, empty)"]
+    Validate --> CalcEngine["Measurement Engine (Detect CRS & Geometry Type)"]
+    CalcEngine --> Persist["Batch Insert FeatureRecord into PostgreSQL"]
+    Persist --> Cleanup["Delete temporary staged upload files"]
+    Cleanup --> StreamAck["XACK message on Redis Stream"]
+    Worker -.->|Orphan recovery| AutoClaim["XAUTOCLAIM timed-out pending jobs"]
+```
+
+---
+
+### 3. Measurement Calculation Flow & Metric Assignment
+
+Geospatial measurements depend fundamentally on geometry dimension:
+
+| Geometry Type | Supported Metrics | `area_sq_m` | `perimeter_m` | `length_m` | Calculation Method |
+| :--- | :--- | :---: | :---: | :---: | :--- |
+| **Polygon / MultiPolygon** | 2D Area & Boundary Perimeter | $\text{Value } (m^2)$ | $\text{Value } (m)$ | `null` | `GEODESIC_WGS84` or `PROJECTED_PLANAR` |
+| **LineString / MultiLineString** | 1D Trajectory Length | `null` | `null` | $\text{Value } (m)$ | `GEODESIC_WGS84` or `PROJECTED_PLANAR` |
+| **Point / MultiPoint** | 0D Location (Zero dimension) | `null` | `null` | `null` | `NONE` |
+| **Invalid / Empty** | Topological defect (e.g. self-intersection) | `null` | `null` | `null` | `null` (Flagged with diagnostics) |
+
+---
+
+### 4. Coordinate Reference System (CRS) Handling
+
+1. **Geographic Coordinates (e.g. WGS84 / EPSG:4326):**
+   - Coordinates represent angular degrees $(\text{longitude}, \text{latitude})$.
+   - Planar Euclidean calculations in degrees produce distorted, incorrect values.
+   - The engine utilizes ellipsoidal geodesic algorithms via **PyProj `Geod(ellps="WGS84")`**:
+     - `geod.geometry_area_perimeter(geom)`: Computes true geodesic surface area and perimeter in meters.
+     - `geod.geometry_length(geom)`: Computes great-circle ellipsoidal length in meters.
+2. **Projected Planar Coordinates (e.g. UTM, Web Mercator / EPSG:3857):**
+   - Coordinates are planar Cartesian units projected in meters.
+   - Calculated directly via planar geometry: `geom.area` and `geom.length`.
+3. **Missing or Ambiguous CRS:**
+   - KML defaults to standard WGS84 (`EPSG:4326`).
+   - If an ESRI Shapefile archive lacks a `.prj` definition or cannot be resolved, features are recorded with `measurement_method = null` to prevent erroneous metrics.
+
+---
+
+## Design Decisions & Trade-offs
+
+| Decision | Selected Approach | Alternative Considered | Rationale |
+| :--- | :--- | :--- | :--- |
+| **Framework Choice** | FastAPI | Django / Django REST Framework | FastAPI provides native async/await concurrency, automatic OpenAPI/Swagger documentation, and minimal footprint without the overhead of Django's heavy ORM, admin site, and synchronous defaults. |
+| **Containerization** | Multi-container Docker Compose | Bare-metal local setup | Geospatial dependencies (C-libraries like GDAL, GEOS, PROJ) often fail or differ across host OSs (especially Windows vs Linux). Docker encapsulates system binaries, PostgreSQL, and Redis into reproducible, zero-configuration environments. |
+| **Unified Port :8000** | Multi-stage Docker build; FastAPI serves React static build & SPA fallback | Running separate Node container (port 5173) with Nginx proxy | Simplifies local development, container orchestration, and eliminates CORS complexity. |
+| **Queue Architecture** | Redis Streams (`XADD`, `XREADGROUP`, `XAUTOCLAIM`) | Celery / RabbitMQ or Kafka | Zero heavy JVM or broker dependencies. Consumer groups provide built-in acknowledgment and crash-resilient auto-claiming of orphaned jobs. |
+| **Spatial Validation** | Shapely `is_valid` with `explain_validity` | PostGIS spatial queries directly in DB | In-memory evaluation prior to insertion eliminates database round-trips and surfaces detailed topological error messages. |
+| **Database Access** | SQLAlchemy 2.0 Async + asyncpg | Synchronous psycopg2 / Django ORM | Non-blocking database I/O allows high-throughput metadata and measurement queries concurrently with background processing. |
+
+---
+
+## Local Setup & Execution
+
+### Prerequisites
+- [Docker](https://www.docker.com/) & Docker Compose
+- *Optional for local dev without Docker:* Python 3.11+, Node.js 20+, PostgreSQL 16, Redis 7
+
+### 1. Running with Docker Compose (Recommended)
+
+1. Clone repository and navigate to root:
+   ```bash
+   git clone <repo-url>
+   cd geospatial-file-measurement
+   ```
+
+2. Start all services:
+   ```bash
+   docker compose up -d --build
+   ```
+
+3. Open in browser:
+   - **Interactive Web UI:** `http://localhost:8000/`
+   - **Swagger API Docs:** `http://localhost:8000/docs`
+
+4. Inspect logs:
+   ```bash
+   docker compose logs -f
+   ```
+
+5. Stop services:
+   ```bash
+   docker compose down
+   ```
+
+---
+
+### 2. Running Locally (Without Docker)
+
+1. **Start PostgreSQL and Redis:**
+   Ensure PostgreSQL is running on port 5432 and Redis on port 6379.
+
+2. **Configure environment variables:**
+   ```bash
+   cp .env.example .env
+   ```
+
+3. **Install Python backend dependencies:**
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate  # On Windows: .venv\Scripts\Activate.ps1
+   pip install -r requirements.txt
+   ```
+
+4. **Build the frontend:**
+   ```bash
+   cd frontend
+   npm install
+   npm run build
+   cd ..
+   ```
+
+5. **Start the API service:**
+   ```bash
+   uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+   ```
+
+6. **Start the background worker in a separate terminal:**
+   ```bash
+   python -m app.worker
+   ```
+
+---
+
+## Running the Automated Test Suite
+
+Run the full pytest suite (29 tests) inside the Docker container:
+
+```bash
+docker exec geospatial_api python -m pytest -v
+```
+
+Or locally in your virtual environment:
+
+```bash
+python -m pytest -v
+```
+
+**Test Coverage Highlights:**
+- KML document and ZIP Shapefile ingestion flows.
+- Self-intersecting bowtie polygons and null/empty geometry detection.
+- Geodesic (WGS84 ellipsoidal) and projected planar area and length computations.
+- Redis stream job publishing, consumer group acknowledgment, and auto-claiming.
+- REST API upload, metadata retrieval, pagination, and error responses.
+
+---
+
+## REST API Documentation
 
 ### 1. Health Check
 `GET /health`
+
+**Response (200 OK):**
 ```json
 {
   "status": "healthy"
 }
 ```
 
+---
+
 ### 2. Upload Geospatial File
 `POST /api/files/`
 
-**Request:** `multipart/form-data` with field `file` (`.kml` or `.zip`).
+**Headers:** `Content-Type: multipart/form-data`  
+**Body:** Form field `file` (`.kml` or `.zip` containing `.shp`, `.shx`, and `.dbf`).
 
-**Example cURL:**
+**Example Request (cURL):**
 ```bash
 curl -X POST "http://localhost:8000/api/files/" \
   -H "accept: application/json" \
@@ -85,23 +249,46 @@ curl -X POST "http://localhost:8000/api/files/" \
   "filename": "sample_polygon.kml",
   "file_size": 1420,
   "source_crs": "EPSG:4326",
-  "feature_count": 1,
-  "status": "COMPLETED",
+  "feature_count": 0,
+  "status": "PROCESSING",
   "error_message": null,
-  "created_at": "2026-10-10T15:24:00.000000Z"
+  "created_at": "2026-10-11T12:00:00.000000Z"
 }
 ```
 
-### 3. Retrieve File Metadata
-`GET /api/files/{id}/`
+---
 
-**Example cURL:**
+### 3. Retrieve File Processing Status & Metadata
+`GET /api/files/{id}`
+
+**Example Request:**
 ```bash
-curl -X GET "http://localhost:8000/api/files/e932ec34-5858-45fa-bb26-dcaeb97105cb/"
+curl -X GET "http://localhost:8000/api/files/e932ec34-5858-45fa-bb26-dcaeb97105cb"
 ```
 
-### 4. Retrieve Feature Measurements
-`GET /api/files/{id}/measurements/?page=1&page_size=50`
+**Response (200 OK):**
+```json
+{
+  "id": "e932ec34-5858-45fa-bb26-dcaeb97105cb",
+  "filename": "sample_polygon.kml",
+  "file_size": 1420,
+  "source_crs": "EPSG:4326",
+  "feature_count": 2,
+  "status": "COMPLETED",
+  "error_message": null,
+  "created_at": "2026-10-11T12:00:00.000000Z"
+}
+```
+
+---
+
+### 4. Retrieve Computed Feature Measurements
+`GET /api/files/{id}/measurements?page=1&page_size=10`
+
+**Example Request:**
+```bash
+curl -X GET "http://localhost:8000/api/files/e932ec34-5858-45fa-bb26-dcaeb97105cb/measurements?page=1&page_size=10"
+```
 
 **Response (200 OK):**
 ```json
@@ -111,7 +298,8 @@ curl -X GET "http://localhost:8000/api/files/e932ec34-5858-45fa-bb26-dcaeb97105c
       "feature_index": 0,
       "geometry_type": "Polygon",
       "properties": {
-        "Name": "Parcel A"
+        "Name": "Agricultural Parcel 4A",
+        "Owner": "State Dept"
       },
       "validation_status": "VALID",
       "validation_message": null,
@@ -120,43 +308,47 @@ curl -X GET "http://localhost:8000/api/files/e932ec34-5858-45fa-bb26-dcaeb97105c
       "length_m": null,
       "measurement_method": "GEODESIC_WGS84",
       "measurement_crs": "EPSG:4326"
+    },
+    {
+      "feature_index": 1,
+      "geometry_type": "LineString",
+      "properties": {
+        "Name": "Access Road Segment",
+        "SpeedLimit": 45
+      },
+      "validation_status": "VALID",
+      "validation_message": null,
+      "area_sq_m": null,
+      "perimeter_m": null,
+      "length_m": 1248.5134,
+      "measurement_method": "GEODESIC_WGS84",
+      "measurement_crs": "EPSG:4326"
     }
   ],
-  "total": 1,
+  "total": 2,
   "page": 1,
-  "page_size": 50,
+  "page_size": 10,
   "pages": 1
 }
 ```
 
 ---
 
-## Running Locally & With Docker
+## Learnings & Key Takeaways
 
-### Docker Compose (Recommended)
+1. **Dimensional Integrity in Geospatial APIs:**
+   - Differentiating metrics by dimension (surfaces have area/perimeter, linear features have length, points have neither) prevents conflating 1D and 2D spatial concepts and avoids misleading zero-values.
+2. **Ellipsoidal Geodesics vs. Planar Projections:**
+   - Computing Euclidean distance on unprojected degrees introduces severe distortion as latitude deviates from the equator. Geodesic computations using PyProj `Geod` provide millimeter-level surface accuracy without needing to pick local UTM projection zones.
+3. **Asynchronous Stream Consumer Resilience:**
+   - Combining Redis Streams consumer groups (`XREADGROUP`) with orphan-claiming (`XAUTOCLAIM`) enables worker crash-resilience without complex broker infrastructure.
 
-1. Start the service:
-```bash
-docker compose up -d --build
-```
+---
 
-2. View container logs:
-```bash
-docker compose logs -f
-```
+## Future Scope & Enhancements
 
-3. Access the Web Application & Docs:
-- **Web UI:** Visit `http://localhost:8000/` for the interactive measurement console.
-- **API Swagger Documentation:** Visit `http://localhost:8000/docs`.
-
-### Running Tests
-
-Run the comprehensive pytest suite inside the container:
-```bash
-docker exec geospatial_api python -m pytest -v
-```
-All 23 automated tests cover:
-- KML and ZIP Shapefile ingestion.
-- Bowtie self-intersection and empty geometry validation.
-- Geodesic and planar area and length algorithms with numerical tolerances.
-- REST API upload, metadata retrieval, pagination, and error cases (404, 415).
+- **Interactive Leaflet / MapLibre Preview:** Render geospatial features and their boundaries on an interactive slippy map in the frontend console.
+- **Additional Vector & Raster Formats:** Expand ingestion support to GeoJSON, FlatGeobuf, GeoPackage (`.gpkg`), and Cloud Optimized GeoTIFF (COG).
+- **Chunked & Streaming Multi-Part Uploads:** Support S3 presigned direct uploads for vector archives exceeding 500 MB.
+- **Auto-Reprojection Options:** Provide client options to request measurements reprojected to user-specified local projection systems (e.g. State Plane or specific UTM zones).
+- **Exporting Metrics:** Enable CSV and GeoJSON export of validated features with computed metrics directly from the UI.
