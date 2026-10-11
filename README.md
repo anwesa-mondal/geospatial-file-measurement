@@ -347,6 +347,7 @@ curl -X GET "http://localhost:8000/api/files/e932ec34-5858-45fa-bb26-dcaeb97105c
 
 ## Future Scope & Enhancements
 
+- **Real-Time Completion Notifications:** Introduce a completion event producer where the worker publishes a notification upon finishing file processing, and a client-facing consumer (via WebSockets or Server-Sent Events / SSE) that pushes updates to automatically transition file status and refresh measurements on the frontend without interval polling.
 - **Interactive Leaflet / MapLibre Preview:** Render geospatial features and their boundaries on an interactive slippy map in the frontend console.
 - **Additional Vector & Raster Formats:** Expand ingestion support to GeoJSON, FlatGeobuf, GeoPackage (`.gpkg`), and Cloud Optimized GeoTIFF (COG).
 - **Chunked & Streaming Multi-Part Uploads:** Support S3 presigned direct uploads for vector archives exceeding 500 MB.
