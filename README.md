@@ -348,6 +348,53 @@ curl -X GET "http://localhost:8000/api/files/e932ec34-5858-45fa-bb26-dcaeb97105c
 
 ---
 
+## Performance & Stress Testing
+
+The API was benchmarked using [Locust](https://locust.io/) inside the containerized Docker environment, testing both maximum capacity saturation and realistic multi-user browser behavior.
+
+### Benchmark Configurations & Scenarios
+
+| Benchmark Dimension | Scenario 1: Maximum Stress & Saturation | Scenario 2: Realistic User Simulation |
+|---|---|---|
+| **Simulated Users** | **100 concurrent workers** | **50 concurrent users** |
+| **Think Time / Delay** | **0 ms (`constant(0)`)** (tight saturation loop) | **0.5s – 1.5s (`between(0.5, 1.5)`)** (human think time) |
+| **Test Duration** | 30 seconds uninterrupted | 30 seconds uninterrupted |
+| **Total Requests** | **8,430 requests** | **1,264 requests** |
+| **Throughput (RPS)** | **285.43 req/s** (Peaked at **326.60 req/s**) | **43.03 req/s** |
+| **Error Rate** | **0.07% (99.93% success rate)** | **0.00% (0 errors)** |
+| **Aggregate Median Latency** | **180 ms** | **7 ms** |
+| **Aggregate p95 Latency** | **740 ms** | **83 ms** |
+
+---
+
+### Scenario 1: Maximum Saturation Results (100 Users, Zero Think Time)
+
+Evaluates the application's breaking point under sustained concurrent load:
+
+| Method & Endpoint | Reqs Count | RPS | Median (50%) | 90th %ile | **95th %ile (p95)** | Max Latency | Failures |
+|---|---|---|---|---|---|---|---|
+| `GET /api/files/{id}` | 2,118 | **71.71** | 100 ms | 200 ms | **240 ms** | 3,983 ms | 1 (0.05%) |
+| `GET /measurements` | 2,227 | **75.40** | 390 ms | 680 ms | **850 ms** | 4,305 ms | 3 (0.13%) |
+| `POST /api/files/` | 1,748 | **59.19** | 430 ms | 780 ms | **1,200 ms** | 4,382 ms | 2 (0.11%) |
+| `GET /health` | 2,337 | **79.13** | 77 ms | 170 ms | **210 ms** | 3,870 ms | 0 (0.00%) |
+| **Aggregated Total** | **8,430** | **285.43 req/s** | **180 ms** | **580 ms** | **740 ms** | **4,382 ms** | **6 (0.07%)** |
+
+---
+
+### Scenario 2: Realistic User Simulation (50 Users, 0.5s–1.5s Think Time)
+
+Simulates active real-world usage where clients upload files, poll status, and inspect paginated measurement tables:
+
+| Method & Endpoint | Reqs Count | RPS | Median (50%) | 90th %ile | **95th %ile (p95)** | Max Latency | Failures |
+|---|---|---|---|---|---|---|---|
+| `GET /api/files/{id}` | 330 | **11.24** | **3 ms** | 9 ms | **14 ms** | 128 ms | **0 (0.00%)** |
+| `GET /measurements` | 283 | **9.64** | **12 ms** | 39 ms | **74 ms** | 217 ms | **0 (0.00%)** |
+| `POST /api/files/` | 274 | **9.33** | **24 ms** | 120 ms | **190 ms** | 340 ms | **0 (0.00%)** |
+| `GET /health` | 377 | **12.84** | **2 ms** | 8 ms | **14 ms** | 114 ms | **0 (0.00%)** |
+| **Aggregated Total** | **1,264** | **43.03 req/s** | **7 ms** | **37 ms** | **83 ms** | **340 ms** | **0 (0.00%)** |
+
+---
+
 ## Learnings & Key Takeaways
 
 1. **Dimensional Integrity in Geospatial APIs:**
@@ -367,3 +414,4 @@ curl -X GET "http://localhost:8000/api/files/e932ec34-5858-45fa-bb26-dcaeb97105c
 - **Chunked & Streaming Multi-Part Uploads:** Support S3 presigned direct uploads for vector archives exceeding 500 MB.
 - **Auto-Reprojection Options:** Provide client options to request measurements reprojected to user-specified local projection systems (e.g. State Plane or specific UTM zones).
 - **Exporting Metrics:** Enable CSV and GeoJSON export of validated features with computed metrics directly from the UI.
+
